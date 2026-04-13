@@ -17,7 +17,8 @@ def create_spark_session():
     builder = SparkSession.builder \
         .appName("WeatherBatchProcessing") \
         .master(master) \
-        .config("spark.sql.warehouse.dir", "/opt/data/hive/warehouse")
+        .config("spark.sql.warehouse.dir", "hdfs://namenode:9000/user/hive/warehouse") \
+        .config("spark.hadoop.hive.metastore.uris", "thrift://hive-metastore:9083")
     try:
         spark = builder.enableHiveSupport().getOrCreate()
     except Exception:
@@ -172,6 +173,7 @@ def main():
 
     # Step 7: Save raw data to Hive for SQL queries
     try:
+        spark.sql("CREATE DATABASE IF NOT EXISTS weather_db")
         save_to_hive(df, "weather_db.raw_readings")
         save_to_hive(daily, "weather_db.daily_stats")
         print("Hive tables created successfully.")

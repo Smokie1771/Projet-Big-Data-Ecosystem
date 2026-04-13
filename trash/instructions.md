@@ -81,11 +81,11 @@ All containers should show status `Up` or `running`.
 
 **Web interfaces available after startup:**
 
-| Service          | URL                        |
-|------------------|----------------------------|
-| HDFS NameNode UI | http://localhost:9870       |
-| Spark Master UI  | http://localhost:8080       |
-| Hive Server UI   | http://localhost:10002      |
+| Service          | URL                        | Notes                          |
+|------------------|----------------------------|--------------------------------|
+| HDFS NameNode UI | http://localhost:9870       |                                |
+| Spark Master UI  | http://localhost:8080       |                                |
+| Hive Server UI   | http://localhost:10002      | Not available in bde2020/hive:2.3.2 — use Beeline (Step 9) instead |
 
 ---
 
@@ -109,13 +109,10 @@ docker exec namenode hdfs dfs -ls /user/weather/raw/
 
 ### Step 4 — Create the Kafka Topic
 
+> **PowerShell note:** PowerShell does not support `\` for line continuation. Use single-line commands (as shown below) or replace `\` with a backtick `` ` `` on Linux/macOS/WSL.
+
 ```
-docker exec kafka kafka-topics --create \
-  --bootstrap-server kafka:9092 \
-  --topic weather-raw \
-  --partitions 3 \
-  --replication-factor 1 \
-  --if-not-exists
+docker exec kafka kafka-topics --create --bootstrap-server kafka:9092 --topic weather-raw --partitions 3 --replication-factor 1 --if-not-exists
 ```
 
 List topics to confirm:
@@ -131,70 +128,26 @@ docker exec kafka kafka-topics --list --bootstrap-server kafka:9092
 The producer reads `weather_streaming.jsonl` and publishes each record to the `weather-raw` topic.
 
 ```
-docker exec spark-master bash -c "pip install kafka-python && python3 /opt/spark-jobs/../../kafka/producer.py file /opt/data/sample/weather_streaming.jsonl"
+docker exec spark-master bash -c "pip install kafka-python -q && python3 /opt/kafka-scripts/producer.py file /opt/data/sample/weather_streaming.jsonl"
 ```
 
 **Alternative — live mode** (generates and streams fresh records in real time):
 
 ```
-docker exec spark-master bash -c "python3 /opt/spark-jobs/../../kafka/producer.py live 200"
+docker exec spark-master bash -c "pip install kafka-python -q && python3 /opt/kafka-scripts/producer.py live 200"
 ```
 
 To verify messages are arriving, run the consumer in a separate terminal:
 
 ```
-docker exec spark-master bash -c "pip install kafka-python && python3 /opt/spark-jobs/../../kafka/consumer.py 100"
+docker exec spark-master bash -c "pip install kafka-python -q && python3 /opt/kafka-scripts/consumer.py 100"
 ```
 
 ---
 
-### Step 6 — Run Spark Batch Processing
+### Step 6 — Initialize the Hive Metastore Schema (first run only)
 
-Submit the PySpark batch job to the Spark cluster. This reads the historical CSV and produces daily/monthly aggregations, station rankings, and anomaly detection results.
-
-```
-docker exec spark-master spark-submit \
-  --master spark://spark-master:7077 \
-  /opt/spark-jobs/batch_processing.py \
-  /opt/data/sample/weather_historical.csv \
-  /opt/data/output
-```
-
-Output is written to `/opt/data/output/` inside the container (mapped to `data/output/` on your machine):
-- `daily_aggregations/` — Parquet
-- `monthly_aggregations/` — Parquet
-- `station_rankings/` — Parquet
-- `anomalies/` — Parquet
-- `hourly_patterns/` — Parquet
-
----
-
-### Step 7 — Run Spark Structured Streaming
-
-Start the streaming job. It consumes live data from Kafka, detects extreme weather alerts, and writes windowed aggregations and archived Parquet files. This runs continuously in the background.
-
-```
-docker exec -d spark-master spark-submit \
-  --master spark://spark-master:7077 \
-  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 \
-  /opt/spark-jobs/streaming_processing.py \
-  kafka:9092 \
-  /opt/data/output/streaming
-```
-
-To see the streaming output (alerts printed to console):
-
-```
-docker logs -f spark-master
-```
-
-Stop following logs with `Ctrl+C` (the streaming job keeps running in the background).
-
----
-
-### Step 8 — Initialize the Hive Metastore Schema (first run only)
-
-On the very first run, the Hive metastore requires a one-time schema initialization in PostgreSQL. Run this before starting HiveServer2:
+On the very first run, the Hive metastore requires a one-time schema initialization in PostgreSQL. This must be done **before** running the Spark batch job:
 
 ```
 docker exec hive-server /opt/hive/bin/schematool -initSchema -dbType postgres
@@ -214,9 +167,51 @@ Wait ~15 seconds, then:
 docker compose restart hive-server
 ```
 
-Wait ~30 seconds for HiveServer2 to fully start before running queries.
+Wait ~30 seconds for HiveServer2 to fully start before proceeding.
 
 > This step is only needed **once**. On subsequent `docker compose up`, the schema already exists in the PostgreSQL volume.
+
+---
+
+### Step 7 — Run Spark Batch Processing
+
+Submit the PySpark batch job to the Spark cluster. This reads the historical CSV and produces daily/monthly aggregations, station rankings, and anomaly detection results, and populates the Hive tables.
+
+```
+docker exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 /opt/spark-jobs/batch_processing.py /opt/data/sample/weather_historical.csv /opt/data/output
+```
+
+Output is written to `/opt/data/output/` inside the container (mapped to `data/output/` on your machine):
+- `daily_aggregations/` — Parquet
+- `monthly_aggregations/` — Parquet
+- `station_rankings/` — Parquet
+- `anomalies/` — Parquet
+- `hourly_patterns/` — Parquet
+
+> **Re-run note:** If you need to re-run the batch on an existing cluster (e.g., after restarting containers), first drop the Hive database to avoid a LOCATION_ALREADY_EXISTS conflict:
+> ```
+> docker exec hive-server beeline -u "jdbc:hive2://localhost:10000" -e "DROP DATABASE IF EXISTS weather_db CASCADE;"
+> docker exec spark-master bash -c "rm -rf /opt/data/hive/warehouse/weather_db.db/"
+> ```
+> Then re-run the spark-submit command above.
+
+---
+
+### Step 8 — Run Spark Structured Streaming
+
+Start the streaming job. It consumes live data from Kafka, detects extreme weather alerts, and writes windowed aggregations and archived Parquet files. This runs continuously in the background.
+
+```
+docker exec -d spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0 /opt/spark-jobs/streaming_processing.py kafka:9092 /opt/data/output/streaming
+```
+
+To see the streaming output (alerts printed to console):
+
+```
+docker logs -f spark-master
+```
+
+Stop following logs with `Ctrl+C` (the streaming job keeps running in the background).
 
 ---
 
@@ -228,17 +223,23 @@ Once the batch job has populated the Hive tables, open a Beeline session and exe
 docker exec -it hive-server beeline -u "jdbc:hive2://localhost:10000"
 ```
 
-Inside the Beeline shell, paste or source the queries:
+Inside the Beeline shell, paste or source the queries. First copy the file into the container:
+
+```
+docker cp hive/queries.hql hive-server:/tmp/queries.hql
+```
+
+Then inside the Beeline shell:
 
 ```sql
-!run /opt/hive/queries.hql
+!run /tmp/queries.hql
 ```
 
 Or run a single query directly from the terminal:
 
 ```
-docker exec hive-server beeline -u "jdbc:hive2://localhost:10000" \
-  -e "SELECT station_name, date, max_temp FROM weather_db.daily_stats ORDER BY max_temp DESC LIMIT 5;"
+docker exec hive-server beeline -u "jdbc:hive2://localhost:10000" -e "SELECT station_name, \`date\`, max_temp FROM weather_db.daily_stats ORDER BY max_temp DESC LIMIT 5;"
+```
 ```
 
 ---
@@ -274,12 +275,18 @@ The Scala job (`spark/WeatherAnalysis.scala`) performs daily aggregations and te
 sbt package
 
 # Submit the JAR
-docker exec spark-master spark-submit \
-  --class WeatherAnalysis \
-  --master spark://spark-master:7077 \
-  /opt/spark-jobs/target/scala-2.12/weather-analysis_2.12-1.0.jar \
-  /opt/data/sample/weather_historical.csv \
+docker exec spark-master spark-submit `
+  --class WeatherAnalysis `
+  --master spark://spark-master:7077 `
+  /opt/spark-jobs/target/scala-2.12/weather-analysis_2.12-1.0.jar `
+  /opt/data/sample/weather_historical.csv `
   /opt/data/output/scala
+```
+
+On PowerShell, use single-line:
+
+```
+docker exec spark-master /opt/spark/bin/spark-submit --class WeatherAnalysis --master spark://spark-master:7077 /opt/spark-jobs/target/scala-2.12/weather-analysis_2.12-1.0.jar /opt/data/sample/weather_historical.csv /opt/data/output/scala
 ```
 
 ---
@@ -319,7 +326,12 @@ docker compose down -v
 | Container not starting | Run `docker compose logs <service>` to see error details |
 | HDFS upload fails | Wait a few more seconds for the namenode to exit safe mode, then retry |
 | Kafka producer can't connect | Ensure the `kafka` container is `Up` before running the producer |
+| `spark-submit: executable file not found` | Use the full path: `/opt/spark/bin/spark-submit` |
 | Spark job fails with memory error | Increase Docker Desktop memory to at least 4 GB in Settings → Resources |
+| Spark batch job stuck waiting for resources | Stop the streaming job first, run the batch, then relaunch streaming |
 | Hive queries fail with `ParseException` on `date` | `date` is a reserved keyword — always wrap it in backticks: `` `date` `` |
-| Hive metastore exits immediately on first run | Run the schema init command in Step 8 before restarting |
+| Hive batch writes fail with `LOCATION_ALREADY_EXISTS` | Drop the database first: `docker exec hive-server beeline -u "jdbc:hive2://localhost:10000" -e "DROP DATABASE IF EXISTS weather_db CASCADE;"` then `docker exec spark-master bash -c "rm -rf /opt/data/hive/warehouse/weather_db.db/"` |
+| Hive metastore exits immediately on first run | Run the schema init command in Step 6 before restarting |
 | Port already in use | Stop any conflicting local services using ports 9092, 8080, or 9870 |
+| PowerShell: `--flag` causes parse error | PowerShell does not support `\` for line continuation. Use single-line commands as shown in the guide |
+| Hive Server UI (port 10002) returns ERR_EMPTY_RESPONSE | The `bde2020/hive:2.3.2` image does not expose a working web UI. Use Beeline for all Hive interaction (Step 9) |

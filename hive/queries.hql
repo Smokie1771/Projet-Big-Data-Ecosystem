@@ -16,7 +16,7 @@ CREATE EXTERNAL TABLE IF NOT EXISTS raw_readings (
     station_name     STRING,
     latitude         DOUBLE,
     longitude        DOUBLE,
-    timestamp        TIMESTAMP,
+    `timestamp`      TIMESTAMP,
     temperature_c    DOUBLE,
     humidity_pct     DOUBLE,
     pressure_hpa     DOUBLE,
@@ -24,7 +24,7 @@ CREATE EXTERNAL TABLE IF NOT EXISTS raw_readings (
     wind_direction   STRING,
     precipitation_mm DOUBLE,
     is_anomaly       BOOLEAN,
-    date             DATE,
+    `date`           DATE,
     hour             INT,
     month            INT
 )
@@ -34,7 +34,7 @@ LOCATION '/user/hive/warehouse/weather_db.db/raw_readings';
 CREATE EXTERNAL TABLE IF NOT EXISTS daily_stats (
     station_id         STRING,
     station_name       STRING,
-    date               DATE,
+    `date`             DATE,
     avg_temp           DOUBLE,
     min_temp           DOUBLE,
     max_temp           DOUBLE,
@@ -122,7 +122,7 @@ ORDER BY hour;
 -- Query 7: Day-over-day temperature change per station
 -- ============================================================
 SELECT a.station_name,
-       a.`date` AS current_date,
+       a.`date` AS day,
        a.avg_temp AS current_avg,
        b.avg_temp AS previous_avg,
        ROUND(a.avg_temp - b.avg_temp, 2) AS temp_change
@@ -131,5 +131,5 @@ JOIN daily_stats b
   ON a.station_id = b.station_id
   AND a.`date` = DATE_ADD(b.`date`, 1)
 WHERE ABS(a.avg_temp - b.avg_temp) > 5
-ORDER BY ABS(a.avg_temp - b.avg_temp) DESC
+ORDER BY ABS(temp_change) DESC
 LIMIT 20;
